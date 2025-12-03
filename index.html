@@ -1,481 +1,503 @@
-import React, { useState, useEffect } from 'react';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged,
-  signInWithCustomToken 
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  addDoc, 
-  query, 
-  orderBy, 
-  onSnapshot, 
-  serverTimestamp,
-  deleteDoc,
-  doc
-} from 'firebase/firestore';
-import { 
-  Loader2, 
-  AlertCircle, 
-  Calendar,
-  MapPin,
-  Clock,
-  ArrowLeftRight,
-  PlusCircle,
-  Utensils,
-  ChefHat,
-  Flame,
-  X
-} from 'lucide-react';
-
-// --- CONFIGURATION ---
-const firebaseConfig = JSON.parse(__firebase_config || '{}');
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'staffbase-widget';
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-
-// --- THEME CONSTANTS ---
-const THEME = {
-  red: '#AD2118', // Chipotle Red
-  darkBrown: '#451400', // Text/Logo Brown
-  offWhite: '#F4F1EB', // Napkin color
-  white: '#FFFFFF',
-  lightGray: '#E5E5E5',
-};
-
-// --- MOCK DATA FOR SHIFTS ---
-const LOCATIONS = [
-  "Lafayette - #32057",
-  "Boulder - Pearl St - #1421",
-  "Denver - Union Station - #2291"
-];
-
-const ROLES = ["Prep", "Grill", "Line", "Cashier", "Expo"];
-
-const INITIAL_SHIFTS = [
-  { id: 's1', date: 'Today', time: '10:00 AM - 6:00 PM', role: 'Prep', location: LOCATIONS[0], status: 'upcoming' },
-  { id: 's2', date: 'Wed, Oct 23', time: '4:00 PM - 10:00 PM', role: 'Grill', location: LOCATIONS[0], status: 'upcoming' },
-  { id: 's3', date: 'Fri, Oct 25', time: '6:00 AM - 2:00 PM', role: 'Tortilla', location: LOCATIONS[0], status: 'upcoming' },
-];
-
-const AVAILABLE_SHIFTS = [
-  { id: 'a1', date: 'Thu, Oct 24', time: '11:00 AM - 3:00 PM', role: 'Cashier', location: LOCATIONS[0] },
-  { id: 'a2', date: 'Sat, Oct 26', time: '5:00 PM - Close', role: 'Line', location: LOCATIONS[1] },
-];
-
-// --- COMPONENTS ---
-
-const Card = ({ children, className = "" }) => (
-  <div className={`bg-white rounded-xl shadow-sm border border-[#E5E5E5] overflow-hidden ${className}`}>
-    {children}
-  </div>
-);
-
-const Button = ({ children, onClick, disabled, variant = 'primary', className = "" }) => {
-  const baseStyle = "px-4 py-2.5 rounded-full font-bold uppercase tracking-wide text-sm transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed";
-  
-  const variants = {
-    primary: `text-white shadow-md hover:opacity-90`,
-    secondary: `bg-white border-2 border-[#451400] text-[#451400] hover:bg-[#F4F1EB]`,
-    outline: `border border-slate-300 text-slate-600 hover:bg-slate-50`,
-    ghost: "text-[#451400] hover:bg-[#F4F1EB]"
-  };
-
-  return (
-    <button 
-      onClick={onClick} 
-      disabled={disabled} 
-      className={`${baseStyle} ${variant !== 'primary' ? variants[variant] : ''} ${className}`}
-      style={variant === 'primary' ? { backgroundColor: THEME.red } : {}}
-    >
-      {children}
-    </button>
-  );
-};
-
-// --- STAFFBASE NOTIFICATION API ---
-// Sends a request to the provided Staffbase endpoint
-const sendStaffbaseNotification = async (messageText) => {
-  const url = "https://app.staffbase.com/api/branch/notifications";
-  const authHeader = "Basic NjgzNjc4ZDVjYTRjODk3MThhZjQxMDRiOl1TT3swcl8yKkRsMlNbcVpRaXY4RSwwKzdZbSE3KChXcVMsXkpZYlN5cTFuTW9FKUY2UyQkLEoqUy5ZRkRCK30=";
-  
-  const payload = {
-    accessorIds: [
-      "6894b616a155797a6ce78bb2"
-    ],
-    channels: [
-      "notificationCenter",
-      "push"
-    ],
-    content: {
-      en_US: {
-        text: messageText
-      },
-      de_DE: {
-        text: messageText 
-      }
-    },
-    icon: {
-      en_US: {
-        type: "font",
-        char: "n"
-      },
-      de_DE: {
-        type: "font",
-        char: "n"
-      }
-    },
-    image: {
-      en_US: {
-        type: "image",
-        href: "https://cdn-icons-png.flaticon.com/512/8677/8677730.png",
-        width: 600,
-        height: 400
-      },
-      de_DE: {
-        type: "image",
-        href: "https://cdn-icons-png.flaticon.com/512/8677/8677730.png",
-        width: 600,
-        height: 400
-      }
-    },
-    link: "https://knowledgepass.kronos.com/auth/saml/login.php"
-  };
-
-  try {
-    console.log("Sending Staffbase Notification...", payload);
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": authHeader,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Staffbase API Error:", response.status, errorText);
-      throw new Error(`API Error: ${response.status}`);
-    }
-
-    console.log("Staffbase Notification Sent Successfully");
-    return true;
-  } catch (error) {
-    console.error("Failed to send Staffbase notification:", error);
-    // Note: We don't block the UI if the notification fails, 
-    // but we log it for debugging.
-    return false;
-  }
-};
-
-// --- BROWSER NOTIFICATION HELPER ---
-const sendBrowserNotification = (title, body) => {
-  if (!("Notification" in window)) {
-    return;
-  }
-
-  if (Notification.permission === "granted") {
-    new Notification(title, { body, icon: 'https://cdn-icons-png.flaticon.com/512/1046/1046755.png' });
-  } else if (Notification.permission !== "denied") {
-    Notification.requestPermission().then((permission) => {
-      if (permission === "granted") {
-        new Notification(title, { body, icon: 'https://cdn-icons-png.flaticon.com/512/1046/1046755.png' });
-      }
-    });
-  }
-};
-
-// --- AUTH GUARD ---
-const AuthGuard = ({ children }) => {
-  const [authState, setAuthState] = useState({ user: null, loading: true, error: null });
-
-  useEffect(() => {
-    let unsubscribe;
-    const initAuth = async () => {
-      try {
-        unsubscribe = onAuthStateChanged(auth, (user) => {
-          if (user) setAuthState({ user, loading: false, error: null });
-        });
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) {
-        setAuthState(prev => ({ ...prev, loading: false, error: "Authentication failed." }));
-      }
-    };
-    initAuth();
-    return () => unsubscribe && unsubscribe();
-  }, []);
-
-  if (authState.loading) return <div className="h-screen flex items-center justify-center bg-[#F4F1EB]"><Loader2 className="w-8 h-8 animate-spin text-[#AD2118]" /></div>;
-  if (authState.error) return <div className="p-4 text-center text-red-600">{authState.error}</div>;
-  return React.cloneElement(children, { user: authState.user });
-};
-
-// --- MAIN WIDGET ---
-const Dashboard = ({ user }) => {
-  const [showAvailableModal, setShowAvailableModal] = useState(false);
-  const [toast, setToast] = useState(null);
-
-  // Auto-hide toast
-  useEffect(() => {
-    if (toast) {
-      const timer = setTimeout(() => setToast(null), 4000);
-      return () => clearTimeout(timer);
-    }
-  }, [toast]);
-
-  const handleSwapRequest = async (shift) => {
-    // 1. Show Toast
-    setToast({
-      title: "Request Sent",
-      message: "Your shift change request has been sent to your manager. An update will be provided soon."
-    });
-
-    // 2. Browser Notification (Local feedback)
-    sendBrowserNotification(
-      "Shift Swap Requested", 
-      `Request for ${shift.date} sent to manager.`
-    );
-
-    // 3. API Notification (Staffbase Backend)
-    // We fire and forget this so it doesn't block the UI
-    await sendStaffbaseNotification("Shift Swap Initiated");
-  };
-
-  const handleShiftRequest = async (shift) => {
-    setShowAvailableModal(false);
-    setToast({
-      title: "Shift Picked Up!",
-      message: `You successfully requested the ${shift.role} shift on ${shift.date}.`
-    });
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chipotle Crew Corner</title>
     
-    sendBrowserNotification(
-      "Shift Requested",
-      `You requested: ${shift.role} at ${shift.time}`
-    );
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    // 3. API Notification (Staffbase Backend)
-    // Customizing message for this action
-    await sendStaffbaseNotification(`Shift Pickup Requested: ${shift.role} on ${shift.date}`);
-  };
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #F4F1EB; }
+        .spin { animation: spin 1s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
 
-  return (
-    <div className="min-h-screen font-sans text-[#451400]" style={{ backgroundColor: THEME.offWhite }}>
-      
-      {/* --- HEADER --- */}
-      <div className="bg-[#AD2118] text-white p-4 sticky top-0 z-10 shadow-md">
-        <div className="max-w-md mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 bg-[#8c1c14] rounded-full flex items-center justify-center border-2 border-[#c43e36]">
-               <Utensils className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold uppercase tracking-wider leading-none">Crew Corner</h1>
-              <p className="text-xs text-red-200 font-medium">Welcome, Team Member</p>
-            </div>
-          </div>
-          <div className="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center">
-            <ChefHat className="w-5 h-5 text-white" />
-          </div>
-        </div>
-      </div>
+    <!-- Firebase SDK Setup -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
-      <div className="max-w-md mx-auto p-4 space-y-6 pb-20">
+        // Expose Firebase to the Global Scope for the React App
+        window.Firebase = {
+            initializeApp,
+            getAuth,
+            signInAnonymously,
+            onAuthStateChanged,
+            signInWithCustomToken,
+            getFirestore,
+            collection,
+            addDoc,
+            query,
+            orderBy,
+            onSnapshot,
+            serverTimestamp,
+            deleteDoc,
+            doc
+        };
         
-        {/* --- AVAILABLE SHIFTS BUTTON --- */}
-        <button 
-          onClick={() => setShowAvailableModal(true)}
-          className="w-full bg-white border-2 border-[#451400] text-[#451400] p-4 rounded-xl flex items-center justify-between shadow-sm active:scale-[0.98] transition-transform group"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-[#F4F1EB] flex items-center justify-center group-hover:bg-[#AD2118] group-hover:text-white transition-colors">
-              <PlusCircle className="w-6 h-6" />
-            </div>
-            <div className="text-left">
-              <h3 className="font-bold text-lg uppercase">Available Shifts</h3>
-              <p className="text-sm text-slate-500">2 shifts near you</p>
-            </div>
-          </div>
-          <div className="text-[#AD2118] font-bold text-sm uppercase tracking-wide">View</div>
-        </button>
+        // Signal that Firebase is loaded
+        window.dispatchEvent(new Event('firebase-ready'));
+    </script>
 
-        {/* --- NEXT SHIFT HERO CARD --- */}
-        <div className="space-y-2">
-          <h2 className="text-xl font-bold uppercase tracking-tight flex items-center gap-2">
-            <Flame className="w-5 h-5 text-[#AD2118]" />
-            Manage Your Shift
-          </h2>
-          
-          <div 
-            className="rounded-2xl p-5 text-white shadow-lg relative overflow-hidden"
-            style={{ 
-              backgroundColor: '#AD2118',
-              backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(0,0,0,0.03) 10px, rgba(0,0,0,0.03) 20px)' 
-            }}
-          >
-            {/* Texture overlay effect */}
-            <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
-              <Utensils className="w-48 h-48 transform rotate-12" />
+    <!-- React Application -->
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // --- ICONS (Inline SVGs to replace Lucide-React) ---
+        const Icon = ({ path, className }) => (
+            <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                width="24" height="24" 
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="currentColor" 
+                strokeWidth="2" 
+                strokeLinecap="round" 
+                strokeLinejoin="round" 
+                className={className}
+            >
+                {path}
+            </svg>
+        );
+
+        const Icons = {
+            Loader2: (props) => <Icon {...props} path={<path d="M21 12a9 9 0 1 1-6.219-8.56" />} className={`${props.className} spin`} />,
+            AlertCircle: (props) => <Icon {...props} path={<><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></>} />,
+            Calendar: (props) => <Icon {...props} path={<><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></>} />,
+            MapPin: (props) => <Icon {...props} path={<><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></>} />,
+            Clock: (props) => <Icon {...props} path={<><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></>} />,
+            ArrowLeftRight: (props) => <Icon {...props} path={<><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></>} />,
+            PlusCircle: (props) => <Icon {...props} path={<><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></>} />,
+            Utensils: (props) => <Icon {...props} path={<><path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2v0a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/></>} />,
+            ChefHat: (props) => <Icon {...props} path={<><path d="M6 13.87A4 4 0 0 1 7.41 6a5.11 5.11 0 0 1 1.05-1.54 5 5 0 0 1 7.08 0A5.11 5.11 0 0 1 16.59 6 4 4 0 0 1 18 13.87V21H6Z"/><line x1="6" x2="18" y1="17" y2="17"/></>} />,
+            Flame: (props) => <Icon {...props} path={<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.1.2-2.2.6-3.3.7 2.5 3 4.5 3 6.8Z"/>} />,
+            X: (props) => <Icon {...props} path={<><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>} />,
+        };
+
+        // --- THEME ---
+        const THEME = {
+            red: '#AD2118',
+            darkBrown: '#451400',
+            offWhite: '#F4F1EB',
+            white: '#FFFFFF',
+            lightGray: '#E5E5E5',
+        };
+
+        const LOCATIONS = [
+            "Lafayette - #32057",
+            "Boulder - Pearl St - #1421",
+            "Denver - Union Station - #2291"
+        ];
+
+        const INITIAL_SHIFTS = [
+            { id: 's1', date: 'Today', time: '10:00 AM - 6:00 PM', role: 'Prep', location: LOCATIONS[0], status: 'upcoming' },
+            { id: 's2', date: 'Wed, Oct 23', time: '4:00 PM - 10:00 PM', role: 'Grill', location: LOCATIONS[0], status: 'upcoming' },
+            { id: 's3', date: 'Fri, Oct 25', time: '6:00 AM - 2:00 PM', role: 'Tortilla', location: LOCATIONS[0], status: 'upcoming' },
+        ];
+
+        const AVAILABLE_SHIFTS = [
+            { id: 'a1', date: 'Thu, Oct 24', time: '11:00 AM - 3:00 PM', role: 'Cashier', location: LOCATIONS[0] },
+            { id: 'a2', date: 'Sat, Oct 26', time: '5:00 PM - Close', role: 'Line', location: LOCATIONS[1] },
+        ];
+
+        // --- COMPONENTS ---
+
+        const Card = ({ children, className = "" }) => (
+            <div className={`bg-white rounded-xl shadow-sm border border-[#E5E5E5] overflow-hidden ${className}`}>
+                {children}
             </div>
+        );
 
-            <p className="text-red-100 font-medium text-sm mb-1">Your next shift</p>
-            <div className="flex items-start gap-2 mb-4">
-               <MapPin className="w-4 h-4 mt-0.5 text-red-200" />
-               <span className="font-medium text-red-50">Lafayette - #32057</span>
-            </div>
-
-            <div className="mb-6">
-              <h3 className="text-5xl font-extrabold tracking-tight mb-1">Prep</h3>
-              <div className="flex items-center gap-3 mt-4 text-lg font-medium">
-                <div className="bg-white/20 px-3 py-1 rounded-md backdrop-blur-sm">
-                  Tomorrow
-                </div>
-                <div className="bg-white/20 px-3 py-1 rounded-md backdrop-blur-sm flex items-center gap-2">
-                  <Clock className="w-4 h-4" />
-                  10:00 AM - 6:00 PM
-                </div>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <button className="flex-1 bg-transparent border-2 border-white/40 hover:bg-white/10 text-white py-2.5 rounded-full font-bold text-sm uppercase transition-colors">
-                Details
-              </button>
-              <button 
-                onClick={() => handleSwapRequest(INITIAL_SHIFTS[0])}
-                className="flex-1 bg-white text-[#AD2118] py-2.5 rounded-full font-bold text-sm uppercase shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2"
-              >
-                <ArrowLeftRight className="w-4 h-4" />
-                Swap
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* --- UPCOMING LIST --- */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold uppercase text-[#451400]">Upcoming Schedule</h2>
-            <button className="text-[#AD2118] text-sm font-bold uppercase hover:underline">See Full Calendar</button>
-          </div>
-
-          {INITIAL_SHIFTS.slice(1).map((shift) => (
-            <Card key={shift.id} className="p-4 flex flex-col gap-4">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h3 className="text-xl font-bold text-[#451400] mb-1">{shift.role}</h3>
-                  <div className="flex items-center gap-2 text-slate-500 text-sm">
-                    <MapPin className="w-3 h-3" />
-                    {shift.location}
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className="font-bold text-[#451400]">{shift.date}</div>
-                  <div className="text-sm text-slate-500">{shift.time}</div>
-                </div>
-              </div>
-              
-              <div className="pt-3 border-t border-slate-100">
-                <Button 
-                  variant="secondary" 
-                  className="w-full !py-2 !text-xs !border-gray-300 !text-slate-600"
-                  onClick={() => handleSwapRequest(shift)}
-                >
-                  Request Swap
-                </Button>
-              </div>
-            </Card>
-          ))}
-        </div>
-      </div>
-
-      {/* --- AVAILABLE SHIFTS MODAL --- */}
-      {showAvailableModal && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-[#F4F1EB] w-full max-w-md rounded-t-2xl sm:rounded-2xl max-h-[80vh] overflow-y-auto shadow-2xl animate-in slide-in-from-bottom-10 duration-200">
-            <div className="sticky top-0 bg-[#F4F1EB] p-4 border-b border-gray-200 flex items-center justify-between z-10">
-              <h2 className="text-xl font-bold uppercase text-[#451400]">Shift Marketplace</h2>
-              <button 
-                onClick={() => setShowAvailableModal(false)}
-                className="p-2 hover:bg-slate-200 rounded-full transition-colors"
-              >
-                <X className="w-6 h-6 text-[#451400]" />
-              </button>
-            </div>
+        const Button = ({ children, onClick, disabled, variant = 'primary', className = "" }) => {
+            const baseStyle = "px-4 py-2.5 rounded-full font-bold uppercase tracking-wide text-sm transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed";
             
-            <div className="p-4 space-y-4">
-              <p className="text-sm text-slate-600 mb-2">Select a shift to send a pickup request to the manager.</p>
-              
-              {AVAILABLE_SHIFTS.map((shift) => (
-                <div key={shift.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-3">
-                  <div className="flex justify-between items-start">
-                    <div className="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded uppercase tracking-wide mb-2 inline-block">
-                      Open
-                    </div>
-                    <span className="text-slate-400 text-xs font-medium">3.5 miles away</span>
-                  </div>
-                  
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 bg-red-50 rounded-lg flex items-center justify-center text-[#AD2118]">
-                      <Calendar className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <h3 className="font-bold text-[#451400] text-lg leading-none mb-1">{shift.date}</h3>
-                      <p className="text-slate-600 text-sm flex items-center gap-1">
-                        <Clock className="w-3 h-3" /> {shift.time}
-                      </p>
-                    </div>
-                  </div>
+            const variants = {
+                primary: `text-white shadow-md hover:opacity-90`,
+                secondary: `bg-white border-2 border-[#451400] text-[#451400] hover:bg-[#F4F1EB]`,
+                outline: `border border-slate-300 text-slate-600 hover:bg-slate-50`,
+                ghost: "text-[#451400] hover:bg-[#F4F1EB]"
+            };
 
-                  <div className="flex justify-between items-center text-sm text-slate-500 pt-2 border-t border-slate-100 mt-1">
-                    <span>{shift.role}</span>
-                    <span>{shift.location}</span>
-                  </div>
+            const style = variant === 'primary' 
+                ? { backgroundColor: THEME.red, color: 'white' } 
+                : {};
 
-                  <Button onClick={() => handleShiftRequest(shift)} className="w-full mt-2">
-                    Request Shift
-                  </Button>
+            return (
+                <button 
+                    onClick={onClick} 
+                    disabled={disabled} 
+                    className={`${baseStyle} ${variant !== 'primary' ? variants[variant] : ''} ${className}`}
+                    style={style}
+                >
+                    {children}
+                </button>
+            );
+        };
+
+        const sendStaffbaseNotification = async (messageText) => {
+            const url = "https://app.staffbase.com/api/branch/notifications";
+            const authHeader = "Basic NjgzNjc4ZDVjYTRjODk3MThhZjQxMDRiOl1TT3swcl8yKkRsMlNbcVpRaXY4RSwwKzdZbSE3KChXcVMsXkpZYlN5cTFuTW9FKUY2UyQkLEoqUy5ZRkRCK30=";
+            
+            const payload = {
+                accessorIds: ["6894b616a155797a6ce78bb2"],
+                channels: ["notificationCenter", "push"],
+                content: {
+                    en_US: { text: messageText },
+                    de_DE: { text: messageText }
+                },
+                icon: {
+                    en_US: { type: "font", char: "n" },
+                    de_DE: { type: "font", char: "n" }
+                },
+                image: {
+                    en_US: { type: "image", href: "https://cdn-icons-png.flaticon.com/512/8677/8677730.png", width: 600, height: 400 },
+                    de_DE: { type: "image", href: "https://cdn-icons-png.flaticon.com/512/8677/8677730.png", width: 600, height: 400 }
+                },
+                link: "https://knowledgepass.kronos.com/auth/saml/login.php"
+            };
+
+            try {
+                console.log("Sending Staffbase Notification...", payload);
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: { "Authorization": authHeader, "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                console.log("Staffbase Notification Sent Successfully");
+                return true;
+            } catch (error) {
+                console.error("Failed to send Staffbase notification:", error);
+                return false;
+            }
+        };
+
+        const sendBrowserNotification = (title, body) => {
+            if (!("Notification" in window)) return;
+            if (Notification.permission === "granted") {
+                new Notification(title, { body, icon: 'https://cdn-icons-png.flaticon.com/512/1046/1046755.png' });
+            } else if (Notification.permission !== "denied") {
+                Notification.requestPermission().then((permission) => {
+                    if (permission === "granted") {
+                        new Notification(title, { body, icon: 'https://cdn-icons-png.flaticon.com/512/1046/1046755.png' });
+                    }
+                });
+            }
+        };
+
+        const AuthGuard = ({ children }) => {
+            const [isReady, setIsReady] = useState(false);
+            const [authState, setAuthState] = useState({ user: null, loading: true, error: null });
+
+            // Wait for Firebase to load
+            useEffect(() => {
+                if(window.Firebase) {
+                    setIsReady(true);
+                } else {
+                    window.addEventListener('firebase-ready', () => setIsReady(true));
+                }
+            }, []);
+
+            useEffect(() => {
+                if (!isReady) return;
+                
+                // Get vars from window.Firebase
+                const { getAuth, onAuthStateChanged, signInWithCustomToken, signInAnonymously } = window.Firebase;
+                
+                // Config from global or default
+                const firebaseConfig = JSON.parse(window.__firebase_config || '{}');
+                // Use the app instance we initialized in the module script if possible, or init again safely
+                // Note: In this script structure, we rely on the module script having initialized the app or us doing it here.
+                // To be safe, let's assume the module exported the classes but maybe we need to init app here if we didn't export 'app'
+                // Actually, let's grab the initialized app if we can, or just init again. 
+                // Creating a new app instance with same name might throw, so we try/catch or just use the SDK.
+                
+                // Simplified for this demo: The module script didn't export the 'app' instance, so we init here.
+                let app;
+                try {
+                    app = window.Firebase.initializeApp(firebaseConfig);
+                } catch(e) {
+                    // App already initialized
+                    app = window.Firebase.getApp ? window.Firebase.getApp() : undefined; 
+                }
+
+                const auth = getAuth(); // Uses default app
+                let unsubscribe;
+
+                const initAuth = async () => {
+                    try {
+                        unsubscribe = onAuthStateChanged(auth, (user) => {
+                            if (user) setAuthState({ user, loading: false, error: null });
+                        });
+                        
+                        if (typeof window.__initial_auth_token !== 'undefined' && window.__initial_auth_token) {
+                            await signInWithCustomToken(auth, window.__initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (err) {
+                        setAuthState(prev => ({ ...prev, loading: false, error: "Authentication failed." }));
+                    }
+                };
+                initAuth();
+                return () => unsubscribe && unsubscribe();
+            }, [isReady]);
+
+            if (!isReady || authState.loading) return (
+                <div className="h-screen flex items-center justify-center bg-[#F4F1EB]">
+                    <Icons.Loader2 className="w-8 h-8 text-[#AD2118]" />
                 </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+            );
+            
+            if (authState.error) return <div className="p-4 text-center text-red-600">{authState.error}</div>;
+            return React.cloneElement(children, { user: authState.user });
+        };
 
-      {/* --- TOAST NOTIFICATION --- */}
-      {toast && (
-        <div className="fixed bottom-4 left-4 right-4 z-50 animate-in slide-in-from-bottom-5 fade-in duration-300">
-          <div className="bg-[#451400] text-white p-4 rounded-lg shadow-xl flex items-start gap-3 max-w-md mx-auto">
-            <div className="bg-green-500 rounded-full p-1 shrink-0 mt-0.5">
-              <Utensils className="w-3 h-3 text-white" />
-            </div>
-            <div>
-              <h4 className="font-bold text-sm uppercase tracking-wide">{toast.title}</h4>
-              <p className="text-sm text-gray-200 mt-1 leading-snug">{toast.message}</p>
-            </div>
-          </div>
-        </div>
-      )}
+        const Dashboard = ({ user }) => {
+            const [showAvailableModal, setShowAvailableModal] = useState(false);
+            const [toast, setToast] = useState(null);
 
-    </div>
-  );
-};
+            useEffect(() => {
+                if (toast) {
+                    const timer = setTimeout(() => setToast(null), 4000);
+                    return () => clearTimeout(timer);
+                }
+            }, [toast]);
 
-// --- APP ROOT ---
-export default function App() {
-  return (
-    <AuthGuard>
-      <Dashboard />
-    </AuthGuard>
-  );
-}
+            const handleSwapRequest = async (shift) => {
+                setToast({
+                    title: "Request Sent",
+                    message: "Your shift change request has been sent to your manager. An update will be provided soon."
+                });
+                sendBrowserNotification("Shift Swap Requested", `Request for ${shift.date} sent to manager.`);
+                await sendStaffbaseNotification("Shift Swap Initiated");
+            };
+
+            const handleShiftRequest = async (shift) => {
+                setShowAvailableModal(false);
+                setToast({
+                    title: "Shift Picked Up!",
+                    message: `You successfully requested the ${shift.role} shift on ${shift.date}.`
+                });
+                sendBrowserNotification("Shift Requested", `You requested: ${shift.role} at ${shift.time}`);
+                await sendStaffbaseNotification(`Shift Pickup Requested: ${shift.role} on ${shift.date}`);
+            };
+
+            return (
+                <div className="min-h-screen font-sans text-[#451400]" style={{ backgroundColor: THEME.offWhite }}>
+                    {/* Header */}
+                    <div className="bg-[#AD2118] text-white p-4 sticky top-0 z-10 shadow-md">
+                        <div className="max-w-md mx-auto flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <div className="w-10 h-10 bg-[#8c1c14] rounded-full flex items-center justify-center border-2 border-[#c43e36]">
+                                    <Icons.Utensils className="w-5 h-5 text-white" />
+                                </div>
+                                <div>
+                                    <h1 className="text-lg font-bold uppercase tracking-wider leading-none">Crew Corner</h1>
+                                    <p className="text-xs text-red-200 font-medium">Welcome, Team Member</p>
+                                </div>
+                            </div>
+                            <div className="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center">
+                                <Icons.ChefHat className="w-5 h-5 text-white" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="max-w-md mx-auto p-4 space-y-6 pb-20">
+                        
+                        <button 
+                            onClick={() => setShowAvailableModal(true)}
+                            className="w-full bg-white border-2 border-[#451400] text-[#451400] p-4 rounded-xl flex items-center justify-between shadow-sm active:scale-[0.98] transition-transform group"
+                        >
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-[#F4F1EB] flex items-center justify-center group-hover:bg-[#AD2118] group-hover:text-white transition-colors">
+                                    <Icons.PlusCircle className="w-6 h-6" />
+                                </div>
+                                <div className="text-left">
+                                    <h3 className="font-bold text-lg uppercase">Available Shifts</h3>
+                                    <p className="text-sm text-slate-500">2 shifts near you</p>
+                                </div>
+                            </div>
+                            <div className="text-[#AD2118] font-bold text-sm uppercase tracking-wide">View</div>
+                        </button>
+
+                        {/* Next Shift Card */}
+                        <div className="space-y-2">
+                            <h2 className="text-xl font-bold uppercase tracking-tight flex items-center gap-2">
+                                <Icons.Flame className="w-5 h-5 text-[#AD2118]" />
+                                Manage Your Shift
+                            </h2>
+                            
+                            <div 
+                                className="rounded-2xl p-5 text-white shadow-lg relative overflow-hidden"
+                                style={{ 
+                                    backgroundColor: '#AD2118',
+                                    backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(0,0,0,0.03) 10px, rgba(0,0,0,0.03) 20px)' 
+                                }}
+                            >
+                                <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+                                    <Icons.Utensils className="w-48 h-48 transform rotate-12" />
+                                </div>
+
+                                <p className="text-red-100 font-medium text-sm mb-1">Your next shift</p>
+                                <div className="flex items-start gap-2 mb-4">
+                                    <Icons.MapPin className="w-4 h-4 mt-0.5 text-red-200" />
+                                    <span className="font-medium text-red-50">Lafayette - #32057</span>
+                                </div>
+
+                                <div className="mb-6">
+                                    <h3 className="text-5xl font-extrabold tracking-tight mb-1">Prep</h3>
+                                    <div className="flex items-center gap-3 mt-4 text-lg font-medium">
+                                        <div className="bg-white/20 px-3 py-1 rounded-md backdrop-blur-sm">Tomorrow</div>
+                                        <div className="bg-white/20 px-3 py-1 rounded-md backdrop-blur-sm flex items-center gap-2">
+                                            <Icons.Clock className="w-4 h-4" />
+                                            10:00 AM - 6:00 PM
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex gap-3">
+                                    <button className="flex-1 bg-transparent border-2 border-white/40 hover:bg-white/10 text-white py-2.5 rounded-full font-bold text-sm uppercase transition-colors">
+                                        Details
+                                    </button>
+                                    <button 
+                                        onClick={() => handleSwapRequest(INITIAL_SHIFTS[0])}
+                                        className="flex-1 bg-white text-[#AD2118] py-2.5 rounded-full font-bold text-sm uppercase shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2"
+                                    >
+                                        <Icons.ArrowLeftRight className="w-4 h-4" />
+                                        Swap
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Upcoming List */}
+                        <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                                <h2 className="text-lg font-bold uppercase text-[#451400]">Upcoming Schedule</h2>
+                                <button className="text-[#AD2118] text-sm font-bold uppercase hover:underline">See Full Calendar</button>
+                            </div>
+
+                            {INITIAL_SHIFTS.slice(1).map((shift) => (
+                                <Card key={shift.id} className="p-4 flex flex-col gap-4">
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <h3 className="text-xl font-bold text-[#451400] mb-1">{shift.role}</h3>
+                                            <div className="flex items-center gap-2 text-slate-500 text-sm">
+                                                <Icons.MapPin className="w-3 h-3" />
+                                                {shift.location}
+                                            </div>
+                                        </div>
+                                        <div className="text-right">
+                                            <div className="font-bold text-[#451400]">{shift.date}</div>
+                                            <div className="text-sm text-slate-500">{shift.time}</div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="pt-3 border-t border-slate-100">
+                                        <Button 
+                                            variant="secondary" 
+                                            className="w-full !py-2 !text-xs !border-gray-300 !text-slate-600"
+                                            onClick={() => handleSwapRequest(shift)}
+                                        >
+                                            Request Swap
+                                        </Button>
+                                    </div>
+                                </Card>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Available Shifts Modal */}
+                    {showAvailableModal && (
+                        <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4 backdrop-blur-sm">
+                            <div className="bg-[#F4F1EB] w-full max-w-md rounded-t-2xl sm:rounded-2xl max-h-[80vh] overflow-y-auto shadow-2xl animate-in slide-in-from-bottom-10 duration-200">
+                                <div className="sticky top-0 bg-[#F4F1EB] p-4 border-b border-gray-200 flex items-center justify-between z-10">
+                                    <h2 className="text-xl font-bold uppercase text-[#451400]">Shift Marketplace</h2>
+                                    <button 
+                                        onClick={() => setShowAvailableModal(false)}
+                                        className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                                    >
+                                        <Icons.X className="w-6 h-6 text-[#451400]" />
+                                    </button>
+                                </div>
+                                
+                                <div className="p-4 space-y-4">
+                                    <p className="text-sm text-slate-600 mb-2">Select a shift to send a pickup request to the manager.</p>
+                                    
+                                    {AVAILABLE_SHIFTS.map((shift) => (
+                                        <div key={shift.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-3">
+                                            <div className="flex justify-between items-start">
+                                                <div className="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded uppercase tracking-wide mb-2 inline-block">
+                                                    Open
+                                                </div>
+                                                <span className="text-slate-400 text-xs font-medium">3.5 miles away</span>
+                                            </div>
+                                            
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-12 h-12 bg-red-50 rounded-lg flex items-center justify-center text-[#AD2118]">
+                                                    <Icons.Calendar className="w-6 h-6" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="font-bold text-[#451400] text-lg leading-none mb-1">{shift.date}</h3>
+                                                    <p className="text-slate-600 text-sm flex items-center gap-1">
+                                                        <Icons.Clock className="w-3 h-3" /> {shift.time}
+                                                    </p>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex justify-between items-center text-sm text-slate-500 pt-2 border-t border-slate-100 mt-1">
+                                                <span>{shift.role}</span>
+                                                <span>{shift.location}</span>
+                                            </div>
+
+                                            <Button onClick={() => handleShiftRequest(shift)} className="w-full mt-2">
+                                                Request Shift
+                                            </Button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Toast */}
+                    {toast && (
+                        <div className="fixed bottom-4 left-4 right-4 z-50 animate-in slide-in-from-bottom-5 fade-in duration-300">
+                            <div className="bg-[#451400] text-white p-4 rounded-lg shadow-xl flex items-start gap-3 max-w-md mx-auto">
+                                <div className="bg-green-500 rounded-full p-1 shrink-0 mt-0.5">
+                                    <Icons.Utensils className="w-3 h-3 text-white" />
+                                </div>
+                                <div>
+                                    <h4 className="font-bold text-sm uppercase tracking-wide">{toast.title}</h4>
+                                    <p className="text-sm text-gray-200 mt-1 leading-snug">{toast.message}</p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(
+            <AuthGuard>
+                <Dashboard />
+            </AuthGuard>
+        );
+    </script>
+</body>
+</html>
